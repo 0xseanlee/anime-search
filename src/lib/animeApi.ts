@@ -76,6 +76,26 @@ function mapMedia(m: any): Anime {
   return base
 }
 
+async function aniFetch(query: string, variables: Record<string, unknown>): Promise<any> {
+  const resp = await fetch(ANILIST_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({ query, variables }),
+  })
+  const text = await resp.text()
+  let data: any = null
+  try { data = text ? JSON.parse(text) : null } catch { /* non-json */ }
+  if (!resp.ok) {
+    const msg = data?.errors?.[0]?.message ?? data?.error ?? text.slice(0, 300)
+    throw new Error(msg ? `AniList ${resp.status}: ${msg}` : `AniList HTTP ${resp.status}`)
+  }
+  if (data?.errors?.length) {
+    // GraphQL 200 但帶 errors（例如欄位不存在）
+    throw new Error(data.errors[0].message ?? 'AniList GraphQL error')
+  }
+  return data
+}
+
 async function searchAnimeWith(term: string): Promise<Anime[]> {
   const gql = `
 query ($search: String) {
@@ -85,13 +105,7 @@ query ($search: String) {
     }
   }
 }`
-  const resp = await fetch(ANILIST_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-    body: JSON.stringify({ query: gql, variables: { search: term } }),
-  })
-  if (!resp.ok) throw new Error(`查詢失敗（HTTP ${resp.status}）`)
-  const data = await resp.json()
+  const data = await aniFetch(gql, { search: term })
   const list = data?.data?.Page?.media ?? []
   return list.map(mapMedia)
 }
@@ -112,40 +126,71 @@ export async function searchAnime(query: string): Promise<Anime[]> {
   return out.slice(0, 15)
 }
 
+// 熱門榜單 — 對 400 做降級重試（AniList 偶發欄位/變數校驗），確保首頁不白屏
 export async function fetchTrendingAnime(limit = 12): Promise<Anime[]> {
+  const perPage = Math.min(Math.max(limit, 1), 50)
   const gql = `
 query ($perPage: Int) {
   Page(perPage: $perPage) {
     media(sort: TRENDING_DESC, type: ANIME, isAdult: false) {
       ${MEDIA_FIELDS}
     }
-  }`
-  const resp = await fetch(ANILIST_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-    body: JSON.stringify({ query: gql, variables: { perPage: limit } }),
-  })
-  if (!resp.ok) throw new Error(`熱門榜單載入失敗（HTTP ${resp.status}）`)
-  const data = await resp.json()
-  const list = data?.data?.Page?.media ?? []
-  return list.map(mapMedia)
+  }
+}`
+  try {
+    const data = await aniFetch(gql, { perPage })
+    const list = data?.data?.Page?.media ?? []
+    return list.map(mapMedia)
+  } catch (e) {
+    // 降級：用最簡欄位 + inline perPage 重試一次
+    const fallbackGql = `
+query {
+  Page(perPage: ${perPage}) {
+    media(sort: TRENDING_DESC, type: ANIME, isAdult: false) {
+      id
+      title { romaji english native }
+      synonyms
+      format
+      status
+      episodes
+      averageScore
+      popularity
+      seasonYear
+      season
+      genres
+      coverImage { extraLarge large color }
+      bannerImage
+      externalLinks { site url }
+    }
+  }
+}`
+    try {
+      const data2 = await aniFetch(fallbackGql, {})
+      const list2 = data2?.data?.Page?.media ?? []
+      // 降級的 media 缺部分欄位，補齊後映射
+      return list2.map((m: any) => mapMedia({
+        ...m,
+        duration: m.duration ?? null,
+        description: m.description ?? '',
+        studios: m.studios ?? { nodes: [] },
+      }))
+    } catch {
+      throw e instanceof Error ? e : new Error(String(e))
+    }
+  }
 }
 
 export async function fetchPopularAnime(limit = 12): Promise<Anime[]> {
+  const perPage = Math.min(Math.max(limit, 1), 50)
   const gql = `
 query ($perPage: Int) {
   Page(perPage: $perPage) {
     media(sort: POPULARITY_DESC, type: ANIME, isAdult: false) {
       ${MEDIA_FIELDS}
     }
-  }`
-  const resp = await fetch(ANILIST_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-    body: JSON.stringify({ query: gql, variables: { perPage: limit } }),
-  })
-  if (!resp.ok) throw new Error(`熱門榜單載入失敗（HTTP ${resp.status}）`)
-  const data = await resp.json()
+  }
+}`
+  const data = await aniFetch(gql, { perPage })
   const list = data?.data?.Page?.media ?? []
   return list.map(mapMedia)
 }
