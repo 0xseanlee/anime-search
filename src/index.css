@@ -1,0 +1,31 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* brand colors */
+.anime-root {
+  --stream-bahamut: #00A0E9;
+  --stream-bahamut-fg: #ffffff;
+  --stream-crunchyroll: #FF642E;
+  --stream-crunchyroll-fg: #ffffff;
+  --stream-netflix: #E50914;
+  --stream-netflix-fg: #ffffff;
+  --stream-disney: #113CCF;
+  --stream-disney-fg: #ffffff;
+  --stream-prime: #00A8E1;
+  --stream-prime-fg: #ffffff;
+  --stream-bilibili: #00A1D6;
+  --stream-bilibili-fg: #ffffff;
+  --stream-hulu: #1CE783;
+  --stream-hulu-fg: #000000;
+  --stream-hidive: #00AEEF;
+  --stream-hidive-fg: #ffffff;
+  --stream-muse: #7C3AED;
+  --stream-muse-fg: #ffffff;
+  --stream-iqiyi: #00CC52;
+  --stream-iqiyi-fg: #ffffff;
+  --stream-default: #6B7280;
+  --stream-default-fg: #ffffff;
+}
+
+* { scrollbar-width: thin; }
