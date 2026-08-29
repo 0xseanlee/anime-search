@@ -63,7 +63,7 @@ function mapMedia(m: any): Anime {
     coverImage: m.coverImage?.extraLarge ?? m.coverImage?.large ?? '',
     coverColor: m.coverImage?.color ?? '',
     bannerImage: m.bannerImage ?? '',
-    description: (m.description ?? '').replace(/<[^>]*>/g, '').slice(0, 280),
+    description: (m.description ?? '').replace(/<[^>]*>/g, '').slice(0, 900),
     studios: (m.studios?.nodes ?? []).map((n: any) => n.name).slice(0, 2),
     externalLinks: (m.externalLinks ?? [])
       .filter((l: any) => l.url)
@@ -89,10 +89,7 @@ async function aniFetch(query: string, variables: Record<string, unknown>): Prom
     const msg = data?.errors?.[0]?.message ?? data?.error ?? text.slice(0, 300)
     throw new Error(msg ? `AniList ${resp.status}: ${msg}` : `AniList HTTP ${resp.status}`)
   }
-  if (data?.errors?.length) {
-    // GraphQL 200 但帶 errors（例如欄位不存在）
-    throw new Error(data.errors[0].message ?? 'AniList GraphQL error')
-  }
+  if (data?.errors?.length) throw new Error(data.errors[0].message ?? 'AniList GraphQL error')
   return data
 }
 
@@ -126,7 +123,6 @@ export async function searchAnime(query: string): Promise<Anime[]> {
   return out.slice(0, 15)
 }
 
-// 熱門榜單 — 對 400 做降級重試（AniList 偶發欄位/變數校驗），確保首頁不白屏
 export async function fetchTrendingAnime(limit = 12): Promise<Anime[]> {
   const perPage = Math.min(Math.max(limit, 1), 50)
   const gql = `
@@ -142,7 +138,6 @@ query ($perPage: Int) {
     const list = data?.data?.Page?.media ?? []
     return list.map(mapMedia)
   } catch (e) {
-    // 降級：用最簡欄位 + inline perPage 重試一次
     const fallbackGql = `
 query {
   Page(perPage: ${perPage}) {
@@ -167,13 +162,7 @@ query {
     try {
       const data2 = await aniFetch(fallbackGql, {})
       const list2 = data2?.data?.Page?.media ?? []
-      // 降級的 media 缺部分欄位，補齊後映射
-      return list2.map((m: any) => mapMedia({
-        ...m,
-        duration: m.duration ?? null,
-        description: m.description ?? '',
-        studios: m.studios ?? { nodes: [] },
-      }))
+      return list2.map((m: any) => mapMedia({ ...m, duration: m.duration ?? null, description: m.description ?? '', studios: m.studios ?? { nodes: [] } }))
     } catch {
       throw e instanceof Error ? e : new Error(String(e))
     }
@@ -188,9 +177,91 @@ query ($perPage: Int) {
     media(sort: POPULARITY_DESC, type: ANIME, isAdult: false) {
       ${MEDIA_FIELDS}
     }
-  }
-}`
+  }`
   const data = await aniFetch(gql, { perPage })
   const list = data?.data?.Page?.media ?? []
   return list.map(mapMedia)
+}
+
+/** 單部 by id — 用於 /anime/:slug 與 /where-to-watch/:slug */
+export async function fetchAnimeById(id: number): Promise<Anime | null> {
+  const gql = `
+query ($id: Int) {
+  Media(id: $id, type: ANIME) {
+    ${MEDIA_FIELDS}
+    relations { edges { relationType } nodes { id title { romaji english native } coverImage { large } format status } }
+    recommendations(perPage: 6, sort: RATING_DESC) { nodes { mediaRecommendation { id title { romaji english native } coverImage { large } averageScore } } }
+  }
+}`
+  const data = await aniFetch(gql, { id })
+  const m = data?.data?.Media
+  if (!m) return null
+  const base = mapMedia(m)
+  // 附加關聯（可選，不影響既有欄位）
+  const relNodes: any[] = m.relations?.nodes ?? []
+  const recNodes: any[] = (m.recommendations?.nodes ?? []).map((n: any) => n.mediaRecommendation).filter(Boolean)
+  ;(base as any)._relations = relNodes.slice(0, 8)
+  ;(base as any)._recommendations = recNodes.slice(0, 6)
+  return base
+}
+
+export async function fetchAnimeByGenre(genre: string, perPage = 18): Promise<Anime[]> {
+  const gql = `
+query ($genre: String, $perPage: Int) {
+  Page(perPage: $perPage) {
+    media(genre: $genre, type: ANIME, isAdult: false, sort: POPULARITY_DESC) {
+      ${MEDIA_FIELDS}
+    }
+  }
+}`
+  const data = await aniFetch(gql, { genre, perPage })
+  return (data?.data?.Page?.media ?? []).map(mapMedia)
+}
+
+export async function fetchAnimeBySeason(year: number, season: string, perPage = 24): Promise<Anime[]> {
+  const s = season.toUpperCase()
+  const gql = `
+query ($year: Int, $season: MediaSeason, $perPage: Int) {
+  Page(perPage: $perPage) {
+    media(seasonYear: $year, season: $season, type: ANIME, isAdult: false, sort: POPULARITY_DESC) {
+      ${MEDIA_FIELDS}
+    }
+  }
+}`
+  const data = await aniFetch(gql, { year, season: s, perPage })
+  return (data?.data?.Page?.media ?? []).map(mapMedia)
+}
+
+/** 平台清單 — 以關鍵字在 externalLinks 匹配（小寫），取前 N 部熱門 */
+export async function fetchAnimeByPlatformSlug(platformSlug: string, perPage = 18): Promise<Anime[]> {
+  // 先抓一批熱門，再本地過濾 externalLinks，降低 AniList 查詢複雜度
+  const pool = await fetchPopularAnime(50)
+  const { matchPlatform } = await import('../seo/platforms')
+  // 需要重新抓這些 id 的完整 links（pool 已有），直接過濾即可
+  const keywords = (() => {
+    const map: Record<string, string[]> = {
+      bahamut: ['bahamut', 'gamer', 'ani.gamer'],
+      crunchyroll: ['crunchyroll'],
+      netflix: ['netflix'],
+      'disney-plus': ['disney'],
+      'prime-video': ['prime', 'primevideo', 'amazon'],
+      bilibili: ['bilibili'],
+      hulu: ['hulu'],
+      hidive: ['hidive'],
+      iqiyi: ['iqiyi', 'iq.com'],
+      muse: ['muse'],
+    }
+    return map[platformSlug] ?? [platformSlug]
+  })()
+  const filtered = pool.filter((a) =>
+    a.externalLinks.some((l) => {
+      const s = (l.site ?? '').toLowerCase()
+      const u = (l.url ?? '').toLowerCase()
+      return keywords.some((k: string) => s.includes(k) || u.includes(k))
+    })
+  )
+  // 若過濾太少，回退到 pool 前 N 部（避免空白頁）
+  const list = filtered.length >= 6 ? filtered : pool
+  void matchPlatform
+  return list.slice(0, perPage)
 }
